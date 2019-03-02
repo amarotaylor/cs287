@@ -102,7 +102,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,BATCH_SIZE):
         src = batch.src.values.transpose(0,1)
         trg = batch.trg.values.transpose(0,1)
         if src.shape[0]!=BATCH_SIZE:
-            #print(src.shape)
+            x = 'blah'
         else:
             # generate hidden state for decoder
             context, hidden_s2c = seq2context(src,h0)
