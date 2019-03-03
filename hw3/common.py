@@ -14,8 +14,8 @@ class SequenceModel(nn.Module):
         self.embedding = nn.Embedding(src_vocab_size, context_size)
         # langauge summarization
         self.lstm = nn.LSTM(input_size=context_size, hidden_size=context_size, num_layers=num_layers, batch_first=True)
-        for p in self.lstm.parameters():
-            torch.nn.init.uniform_(p, a=weight_init, b=weight_init)
+        #for p in self.lstm.parameters():
+        #    torch.nn.init.uniform_(p, a=weight_init, b=weight_init)
 
     def forward(self, inputs, h0=None):
         # embed the words 
@@ -33,8 +33,8 @@ class LanguageModel(nn.Module):
         # hidden to hidden 
         self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, num_layers=1, batch_first=True)
         # decode hidden state for y_t
-        for p in self.lstm.parameters():
-            torch.nn.init.uniform_(p, a=weight_init, b=weight_init)
+        #for p in self.lstm.parameters():
+        #    torch.nn.init.uniform_(p, a=weight_init, b=weight_init)
             
         self.translate = nn.Linear(hidden_size, target_vocab_size)
 
@@ -92,7 +92,7 @@ def training_loop(e,train_iter,seq2context,context2trg,seq2context_optimizer,con
         if np.mod(ix,100) == 0:
             print('Epoch: {}, Batch: {}, Loss: {}, Variance: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE, var))
             
-def validation_loop(e,val_iter,seq2context,context2trg,BATCH_SIZE):
+def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2trg_sch,BATCH_SIZE):
     seq2context.eval()
     context2trg.eval()
     context_size = seq2context.context_size
@@ -121,5 +121,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,BATCH_SIZE):
             total_words += mask.sum().float()
     #ppl = torch.exp(track_mean/torch.tensor(ix).float())
     ppl = torch.exp(total_loss/total_words)
+    seq2context_sch.step(ppl)
+    context2trg_sch.step(ppl)
     print('Epoch: {}, Validation loss: {}, Validation ppl: {}'.format(e, total_loss/(BATCH_SIZE*len(val_iter)), ppl))
               
