@@ -80,7 +80,7 @@ def reverse_sequence(src):
     return rev_src
 
 lsm = torch.nn.LogSoftmax(dim=2)
-criterion = nn.CrossEntropyLoss(reduction='sum')
+criterion = nn.CrossEntropyLoss(reduction='none')
 
 def training_loop(e,train_iter,seq2context,context2trg,seq2context_optimizer,context2trg_optimizer,BATCH_SIZE):
     seq2context.train()
@@ -101,10 +101,10 @@ def training_loop(e,train_iter,seq2context,context2trg,seq2context_optimizer,con
             context, hidden_s2c = seq2context(src)
             output, hidden_lm = context2trg(trg[:,:-1],hidden_s2c)
             loss = criterion(output.transpose(2,1),trg[:,1:])
-            #mask = trg[:,1:]!=1
-            #loss = loss[mask].sum()
-            #clip_grad_norm_(seq2context.parameters(), max_norm=5)
-            #clip_grad_norm_(context2trg.parameters(), max_norm=5)
+            mask = trg[:,1:]!=1
+            loss = loss[mask].sum()
+            clip_grad_norm_(seq2context.parameters(), max_norm=5)
+            clip_grad_norm_(context2trg.parameters(), max_norm=5)
             loss.backward()
             seq2context_optimizer.step()
             context2trg_optimizer.step()
@@ -122,6 +122,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
     total_words = torch.tensor(0.0)
     for ix,batch in enumerate(val_iter):        
         src = batch.src.values.transpose(0,1)
+        src = reverse_sequence(src)
         trg = batch.trg.values.transpose(0,1)
         if src.shape[0]!=BATCH_SIZE:
             x = 'blah'
@@ -129,8 +130,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
             # generate hidden state for decoder
             context, hidden_s2c = seq2context(src,h0)
             #hidden = repackage_layer(hidden_s2c,context_size)
-            last_hidden = tuple([hidden_s2c[0][-1].unsqueeze(0),hidden_s2c[1][-1].unsqueeze(0)])
-            output, hidden_lm = context2trg(trg[:,:-1],last_hidden)
+            output, hidden_lm = context2trg(trg[:,:-1],hidden_s2c)
             loss = criterion(output.transpose(2,1),trg[:,1:])
             mask = trg[:,1:]!=1
             loss = loss[mask].detach().sum()
@@ -141,7 +141,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
             #track_mean += mean_loss
             total_words += mask.sum().float()
     ppl = torch.exp(total_loss/total_words)
-    seq2context_sch.step(ppl)
-    context2trg_sch.step(ppl)
+    seq2context_sch.step()
+    context2trg_sch.step()
     print('Epoch: {}, Validation loss: {}, Validation ppl: {}'.format(e, total_loss/(BATCH_SIZE*len(val_iter)), ppl))
               
