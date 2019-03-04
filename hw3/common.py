@@ -243,4 +243,11 @@ class attn_RNNet_batched(torch.nn.Module):
         output = self.lnr(torch.cat((rnn_output, context), 1))
         # prediction, last_context, last_hidden, weights for vis
         return output, context, hidden, attn_weights 
+    
+    
+def load_model(model,state_dict_path):
+    state_dict = torch.load(state_dict_path)
+    model.load_state_dict(state_dict)
+
+    
               
