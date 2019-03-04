@@ -390,7 +390,7 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
         for k in range(K):
             best = done[b][top[k]]
             if padding:
-                m = nn.ConstantPad1d((0, max_len - best[2]), EN.vocab.stoi['<pad>'])
+                m = nn.ConstantPad1d((0, max(0, max_len - best[2])), EN.vocab.stoi['<pad>'])
                 predictions[b].append(m(best[0].long()))
             else:
                 predictions[b].append(best[0].long())
