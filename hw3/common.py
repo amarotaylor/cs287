@@ -271,7 +271,7 @@ def softmax(X, theta = 1.0, axis = None):
 
     return p    
               
-def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len, output_width=1, alpha=1, padding=False):
+def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len, output_width=1, alpha=1, BATCH_SIZE=32, padding=False,EN=None):
     '''
     run beam search and return top predictions
         - seq2context: encoder model
@@ -409,3 +409,50 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
             #print([EN.vocab.itos[i] for i in best[0].long()])
     
     return predictions
+
+
+def attn_training_split_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,BATCH_SIZE=32,context_size=500,EN=None):
+    seq2context.train()
+    attn_context2trg.train()
+    for ix,batch in enumerate(train_iter):
+        src = batch.src.values.transpose(0,1)
+        src = reverse_sequence(src)
+        trg = batch.trg.values.transpose(0,1)
+        if trg.shape[0] == BATCH_SIZE:
+        
+            seq2context_optimizer.zero_grad()
+            attn_context2trg_optimizer.zero_grad()
+            loss = 0
+            decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
+            encoder_outputs, encoder_hidden = seq2context(src)    
+            decoder_hidden = encoder_hidden
+            sentence = []
+            p = np.random.rand()
+            if p > 0.5:
+                
+            
+                for j in range(trg.shape[1] - 1):
+                    word_input = trg[:,j]
+                    decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
+                    #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
+                    loss += criterion_train(decoder_output, trg[:,j+1])
+                
+                    if np.mod(ix,100) == 0:
+                        sentence.extend([torch.argmax(decoder_output[0,:],dim=0)])
+            else:
+                
+                predictions = beamsearch(seq2context, attn_context2trg, context_size, src,EN=EN, beam_width=1, max_len=trg.shape[1], output_width=1, alpha=1, padding=True)
+                predictions = torch.stack([t[0] for t in predictions.values()])
+                for j in range(predictions.shape[1] - 1):
+                    word_input = predictions[:,j]
+                    decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
+                    #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
+                    loss += criterion_train(decoder_output, trg[:,j+1])
+            loss.backward()
+            seq2context_optimizer.step()
+            attn_context2trg_optimizer.step()
+        
+            if np.mod(ix,500) == 0:
+                print('Epoch: {}, Batch: {}, Loss: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE))
+                #print([EN.vocab.itos[i] for i in sentence])
+                #print([EN.vocab.itos[i] for i in trg[0,:]])
