@@ -249,5 +249,25 @@ def load_model(model,state_dict_path):
     state_dict = torch.load(state_dict_path)
     model.load_state_dict(state_dict)
 
-    
+# numpy softmax
+def softmax(X, theta = 1.0, axis = None):
+
+    y = np.atleast_2d(X)
+
+    if axis is None:
+        axis = next(j[0] for j in enumerate(y.shape) if j[1] > 1)
+
+    y = y * float(theta)
+
+    y = y - np.expand_dims(np.max(y, axis = axis), axis)
+
+    y = np.exp(y)
+
+    ax_sum = np.expand_dims(np.sum(y, axis = axis), axis)
+
+    p = y / ax_sum
+
+    if len(X.shape) == 1: p = p.flatten()
+
+    return p    
               
