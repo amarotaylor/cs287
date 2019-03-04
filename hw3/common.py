@@ -382,6 +382,18 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
 
     K = output_width
     for b in range(BATCH_SIZE):
+        if len(done[b]) < K:
+            gap = K - len(done[b])
+            probs = torch.tensor([b_probs[tuple((b,j))][0] for j in range(BEAM_WIDTH)], device='cuda')
+            for c in torch.argsort(probs, descending=True)[0:gap]:  
+                d = c.item()
+                done_string = b_string[b,:,d].long()
+                #print(b_probs[tuple((b,d))])
+                done_prob = b_probs[tuple((b,d))][0]
+                done_len = b_probs[tuple((b,d))][1]
+                done[b].append([done_string, done_prob, done_len])
+                
+    for b in range(BATCH_SIZE):
         normalized_probs = torch.tensor([], device='cuda')
         for sentence in range(len(done[b])):
             normalized = torch.tensor([done[b][sentence][1]/done[b][sentence][2]**alpha], device='cuda')
