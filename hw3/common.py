@@ -141,7 +141,106 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
             #track_mean += mean_loss
             total_words += mask.sum().float()
     ppl = torch.exp(total_loss/total_words)
-    seq2context_sch.step()
-    context2trg_sch.step()
+    seq2context_sch.step(ppl)
+    context2trg_sch.step(ppl)
+    
     print('Epoch: {}, Validation loss: {}, Validation ppl: {}'.format(e, total_loss/(BATCH_SIZE*len(val_iter)), ppl))
+    return ppl
+
+
+
+criterion_train = nn.CrossEntropyLoss(reduction='sum')
+lsm2 = nn.LogSoftmax(dim=1)
+def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,BATCH_SIZE=32,context_size=500):
+    seq2context.train()
+    attn_context2trg.train()
+    for ix,batch in enumerate(train_iter):
+        src = batch.src.values.transpose(0,1)
+        src = reverse_sequence(src)
+        trg = batch.trg.values.transpose(0,1)
+        if trg.shape[0] == BATCH_SIZE:
+        
+            seq2context_optimizer.zero_grad()
+            attn_context2trg_optimizer.zero_grad()
+        
+            encoder_outputs, encoder_hidden = seq2context(src)
+            loss = 0
+            decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
+            decoder_hidden = encoder_hidden
+            sentence = []
+            for j in range(trg.shape[1] - 1):
+                word_input = trg[:,j]
+                decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
+                #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
+                loss += criterion_train(decoder_output, trg[:,j+1])
+                
+                if np.mod(ix,100) == 0:
+                    sentence.extend([torch.argmax(decoder_output[0,:],dim=0)])
+                
+            loss.backward()
+            seq2context_optimizer.step()
+            attn_context2trg_optimizer.step()
+        
+            if np.mod(ix,500) == 0:
+                print('Epoch: {}, Batch: {}, Loss: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE))
+                #print([EN.vocab.itos[i] for i in sentence])
+                #print([EN.vocab.itos[i] for i in trg[0,:]])
+                
+                
+def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,scheduler_s2c,BATCH_SIZE=32,context_size=500):
+    seq2context.eval()
+    attn_context2trg.eval()
+    total_loss = 0
+    total_words = 0
+    for ix,batch in enumerate(val_iter):
+        src = batch.src.values.transpose(0,1)
+        src = reverse_sequence(src)
+        trg = batch.trg.values.transpose(0,1)
+        if trg.shape[0] == BATCH_SIZE:
+        
+            encoder_outputs, encoder_hidden = seq2context(src)
+            loss = 0
+            decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
+            decoder_hidden = encoder_hidden
+            for j in range(trg.shape[1] - 1):
+                word_input = trg[:,j]
+                decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
+                #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
+                loss += criterion_train(decoder_output, trg[:,j+1])
+                
+                  
+            total_loss += loss.detach()
+            total_words += trg.shape[1]*BATCH_SIZE
+    ppl = torch.exp(total_loss/total_words)
+    scheduler_c2t.step(ppl)
+    scheduler_s2c.step(ppl)
+    print('Epoch: {}, Validation PPL: {}'.format(e,ppl))
+    return ppl
+        
+                
+class attn_RNNet_batched(torch.nn.Module):
+
+    def __init__(self, input_size, hidden_size, num_layers, dropout=0.5, weight_init=0.05):
+        super(attn_RNNet_batched, self).__init__()
+        self.emb = torch.nn.Sequential(torch.nn.Embedding(input_size, hidden_size), torch.nn.Dropout(dropout))
+        self.rnn = torch.nn.LSTM(input_size=2*hidden_size, hidden_size=hidden_size, num_layers=num_layers, bias=True, batch_first=True, dropout=dropout)
+        self.lnr = torch.nn.Sequential(torch.nn.Dropout(dropout), torch.nn.Linear(2*hidden_size, input_size))
+    
+        for f in self.parameters():
+            torch.nn.init.uniform_(f, a=-weight_init, b=weight_init)
+      
+    def attn_dot(self,rnn_output,encoder_outputs):
+        return F.softmax(torch.matmul(rnn_output.squeeze(0),encoder_outputs.transpose(0,1)).squeeze(),dim=0).unsqueeze(0).unsqueeze(0)
+
+    def forward(self, word_input, last_context, last_hidden, encoder_outputs):
+        word_embedded = self.emb(word_input)
+        rnn_input = torch.cat([word_embedded, last_context], 1).unsqueeze(1) # batch x 1 x hiddenx2
+        rnn_output, hidden = self.rnn(rnn_input, last_hidden)
+        attn_weights = rnn_output.bmm(encoder_outputs.transpose(1,2))# batch x src_seqlen x 1
+        context = attn_weights.bmm(encoder_outputs)
+        rnn_output = rnn_output.squeeze(1)
+        context = context.squeeze(1)
+        output = self.lnr(torch.cat((rnn_output, context), 1))
+        # prediction, last_context, last_hidden, weights for vis
+        return output, context, hidden, attn_weights 
               
