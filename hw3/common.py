@@ -209,11 +209,12 @@ def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,s
                 word_input = trg[:,j]
                 decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
                 #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
-                loss += criterion_train(decoder_output, trg[:,j+1])
-                
-                  
-            total_loss += loss.detach()
-            total_words += trg.shape[1]*BATCH_SIZE
+                loss = criterion(decoder_output, trg[:,j+1])
+                mask = trg[:,j+1]!=1
+                total_words += mask.sum()
+                track_loss = torch.sum(loss[mask.squeeze()])
+            total_loss += track_loss.detach()
+            
     ppl = torch.exp(total_loss/total_words)
     scheduler_c2t.step(ppl)
     scheduler_s2c.step(ppl)
