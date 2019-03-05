@@ -73,6 +73,7 @@ class RNNet(torch.nn.Module):
 
 def repackage_hidden(h):
     return tuple(v.detach() for v in h)
+
 def reverse_sequence(src):
     length = list(src.shape)[1]
     idx = torch.linspace(length-1, 0, steps=length).long()
@@ -81,6 +82,8 @@ def reverse_sequence(src):
 
 lsm = torch.nn.LogSoftmax(dim=2)
 criterion = nn.CrossEntropyLoss(reduction='none')
+
+
 
 def training_loop(e,train_iter,seq2context,context2trg,seq2context_optimizer,context2trg_optimizer,BATCH_SIZE):
     seq2context.train()
@@ -271,9 +274,10 @@ def softmax(X, theta = 1.0, axis = None):
 
     return p    
               
-def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len, output_width=1, alpha=1, BATCH_SIZE=32, padding=False,EN=None):
+def beamsearch(model, seq2context, context2trg, context_size, src, beam_width, max_len, output_width=1, alpha=1, BATCH_SIZE=32, padding=False, EN=None):
     '''
     run beam search and return top predictions
+        - model: {'s2s', 's2s_attn'}
         - seq2context: encoder model
         - context2trg: decoder model
         - context_size: hidden size
@@ -282,7 +286,9 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
         - max_len: maximum length for predictions
         - output_width: number of predictions to return per sentence
         - alpha: string length discount rate; e.g., normalizing factor = 1/(T^alpha)
+        - BATCH_SIZE: src batch size
         - padding: pad predictions to max_len
+        - EN: English dictionary for string-index conversions
     '''
     # set up
     START_TKN = EN.vocab.stoi["<s>"]
@@ -317,9 +323,15 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
 
     # loop through target sequence max len
     for i in range(1,max_len):
+        print('position:',i)
         if i == 1: # if predicting the word following <s>, take top BEAM_WIDTH preds
-            word_input = b_string[:,i-1,0].long()
-            decoder_output, decoder_context, decoder_hidden, decoder_attention = context2trg(word_input, 
+            if model == 's2s':
+                word_input = b_string[:,0:i,0].long()
+                decoder_output, decoder_hidden = context2trg(word_input, encoder_hidden)
+                decoder_output = decoder_output.detach()[:,-1,:]
+            elif model == 's2s_attn':
+                word_input = b_string[:,i-1,0].long()
+                decoder_output, decoder_context, decoder_hidden, decoder_attention = context2trg(word_input, 
                                                                                              decoder_context, 
                                                                                              decoder_hidden, 
                                                                                              encoder_outputs)
@@ -330,16 +342,38 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
                 for c in range(BEAM_WIDTH):
                     b_probs[tuple((b,c))][0] += logprobs[b, toppreds[b,c]]
                     b_probs[tuple((b,c))][1] += 1
+        elif i == max_len - 1:
+            stored_logprobs = torch.zeros((BATCH_SIZE, BEAM_WIDTH, len(EN.vocab)))
+            for j in range(BEAM_WIDTH):
+                if model == 's2s':
+                    word_input = b_string[:,0:i,j].long()
+                    decoder_output, decoder_hidden = context2trg(word_input, encoder_hidden)
+                    decoder_output = decoder_output.detach()[:,-1,:]
+                elif model == 's2s_attn':
+                    word_input = b_string[:,i-1,j].long()
+                    decoder_output, decoder_context, decoder_hidden, decoder_attention = context2trg(word_input, 
+                                                                                                     decoder_context, 
+                                                                                                     decoder_hidden, 
+                                                                                                     encoder_outputs)
+                logprobs = lsm(decoder_output.detach()) # unsorted log probs
+                stored_logprobs[:,j,:] = logprobs
         else: # if predicting the word for positions 2+, compare top BEAM_WIDTH preds for each of BEAM_WIDTH strings
             curr_probs = {} # temporary storage
             curr_string = torch.zeros(BATCH_SIZE, i+1, BEAM_WIDTH) # temporary storage
 
             for j in range(BEAM_WIDTH):
-                word_input = b_string[:,i-1,j].long()
-                decoder_output, decoder_context, decoder_hidden, decoder_attention = context2trg(word_input, 
-                                                                                                 decoder_context, 
-                                                                                                 decoder_hidden, 
-                                                                                                 encoder_outputs)
+                if j % 1 == 0:
+                    print('beam:',j)
+                if model == 's2s':
+                    word_input = b_string[:,0:i,j].long()
+                    decoder_output, decoder_hidden = context2trg(word_input, encoder_hidden)
+                    decoder_output = decoder_output.detach()[:,-1,:]
+                elif model == 's2s_attn':
+                    word_input = b_string[:,i-1,j].long()
+                    decoder_output, decoder_context, decoder_hidden, decoder_attention = context2trg(word_input, 
+                                                                                                     decoder_context, 
+                                                                                                     decoder_hidden, 
+                                                                                                     encoder_outputs)
                 logprobs = lsm(decoder_output.detach()) # unsorted log probs
                 sortedpreds = torch.argsort(logprobs, dim=1, descending=True) # sorted words
                 toppreds = sortedpreds[:,0:BEAM_WIDTH] # top words
@@ -372,7 +406,7 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
                                     curr_probs[tuple((b,d))] = new_b_prob # update top prob
                                     curr_string[b,0:i,d] = b_string[b,0:i,j] # update sentence
                                     curr_string[b,i,d] = toppreds[b,c] # update top word
-                                    replaced = True                        
+                                    replaced = True  
             b_string[:,0:i+1,:] = curr_string
             # update top strings, probs
             for b in range(BATCH_SIZE):
@@ -384,16 +418,22 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
     for b in range(BATCH_SIZE):
         if len(done[b]) < K:
             gap = K - len(done[b])
-            probs = torch.tensor([b_probs[tuple((b,j))][0] for j in range(BEAM_WIDTH)], device='cuda')
-            for c in torch.argsort(probs, descending=True)[0:gap]:  
-                d = c.item()
+            # probs = torch.tensor([b_probs[tuple((b,j))][0] for j in range(BEAM_WIDTH)], device='cuda')
+            probs = torch.argsort(stored_logprobs[b].view(-1), descending=True)
+            sorted_logprobs = torch.tensor(divmod(probs.numpy(), len(EN.vocab)), device='cuda')
+            sorted_logprobs = sorted_logprobs.transpose(0,1) # BEAM_WIDTHxVOCAB_SIZE x 2
+            for c in sorted_logprobs[0:gap]:  
+                #d = c.item()
+                d = c[0].item()
+                idx = c[1].item()
+                b_string[b,-1,d] = idx
                 done_string = b_string[b,:,d].long()
-                #print(b_probs[tuple((b,d))])
-                done_prob = b_probs[tuple((b,d))][0]
-                done_len = b_probs[tuple((b,d))][1]
+                done_prob = b_probs[tuple((b,d))][0] + stored_logprobs[b,d,idx]
+                done_len = max_len
                 done[b].append([done_string, done_prob, done_len])
                 
     for b in range(BATCH_SIZE):
+        print('batch:',b)
         normalized_probs = torch.tensor([], device='cuda')
         for sentence in range(len(done[b])):
             normalized = torch.tensor([done[b][sentence][1]/done[b][sentence][2]**alpha], device='cuda')
@@ -406,7 +446,8 @@ def beamsearch(seq2context, context2trg, context_size, src, beam_width, max_len,
                 predictions[b].append(m(best[0].long()))
             else:
                 predictions[b].append(best[0].long())
-            #print([EN.vocab.itos[i] for i in best[0].long()])
+            if k % 10 == 0:
+                print([EN.vocab.itos[i] for i in best[0].long()])
     
     return predictions
 
