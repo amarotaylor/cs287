@@ -260,7 +260,6 @@ def softmax(X, theta = 1.0, axis = None):
 def beam_search(src, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_SIZE=32, max_len=3,context_size=500,EN=None):
     top_p = {}
     top_s = {}
-    stopped = torch.zeros((BATCH_SIZE,BEAM_WIDTH), device='cuda') #==1
     items = []
     for i in range(BATCH_SIZE):
         top_p[i] = []
@@ -295,9 +294,10 @@ def beam_search(src, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_S
     encoder_outputs = encoder_outputs.repeat(BEAM_WIDTH,1,1)
     decoder_hidden = tuple([h.repeat(1,BEAM_WIDTH,1) for h in decoder_hidden])
     decoder_context = decoder_context.repeat(BEAM_WIDTH,1)
-
+    mask = torch.zeros(BATCH_SIZE,BEAM_WIDTH,dtype=torch.uint8).cuda()
     for j in range(max_len-1):
             decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(next_words, decoder_context, decoder_hidden, encoder_outputs)
+            
             args = torch.argsort(lsm2(decoder_output),dim=1, descending=True)[:,0:BEAM_WIDTH].detach()
             next_words = torch.cat([args[BATCH_SIZE*(b):BATCH_SIZE*(b+1),:] for b in range(BEAM_WIDTH)],dim=1).detach()
             p_words = torch.stack([torch.index_select(decoder_output[i,:],-1,next_words[i,:]) for i in range(BATCH_SIZE)])
@@ -306,16 +306,17 @@ def beam_search(src, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_S
 
             word_selector = torch.argsort(p_words_norm,dim=1,descending=True)[:,:BEAM_WIDTH]        
             beam_indicator = (word_selector/BEAM_WIDTH).float().long() #word_selector>=2
-
+            
             prev_words = list(top_s.values())
             words = [torch.stack([prev_words[s][i] for i in beam_indicator[s,:]]) for s in range(BATCH_SIZE)]
             update = []
             for ix,p in enumerate(words):
                 update.append([torch.cat((p[b],next_words[ix,b].unsqueeze(0))) for b in range(BEAM_WIDTH)])
             top_s.update(dict(zip(items, update)))
-
+            mask += torch.stack([next_words[s,:].index_select(0,word_selector[s,:]) for s in range(BATCH_SIZE)]) == 3
             update_p = torch.stack([torch.index_select(p_words_running[b], 0, word_selector[b]) for b in range(BATCH_SIZE)])
             top_p.update(dict(zip(items, update_p)))
+            p_words_running = torch.stack([update_p[:,b].repeat(1,BEAM_WIDTH) for b in range(BEAM_WIDTH)]).view(BEAM_WIDTH**2,BATCH_SIZE).transpose(0,1)
 
             indexs = torch.zeros(BATCH_SIZE,BEAM_WIDTH,device='cuda')
             for i in range(BATCH_SIZE):
@@ -365,7 +366,7 @@ def beam_search_first3(encoder_outputs, encoder_hidden, attn_seq2context, attn_c
     decoder_hidden = tuple([h.repeat(1,BEAM_WIDTH,1) for h in decoder_hidden])
     decoder_context = decoder_context.repeat(BEAM_WIDTH,1)
     
-    for j in range(2):
+    for j in range(max_len-2):
             decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(next_words, decoder_context, decoder_hidden, encoder_outputs)
             args = torch.argsort(lsm2(decoder_output),dim=1, descending=True)[:,0:BEAM_WIDTH].detach()
             next_words = torch.cat([args[BATCH_SIZE*(b):BATCH_SIZE*(b+1),:] for b in range(BEAM_WIDTH)],dim=1).detach()
@@ -469,7 +470,7 @@ def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq
            
             sentence = []
             p = np.random.rand()
-            if p > 0.75:
+            if p > 1.0:
                 
             
                 for j in range(0,trg.shape[1]-2):
@@ -486,10 +487,10 @@ def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq
                         sentence.extend([torch.argmax(decoder_output[0,:],dim=0)])
             else:
                 
-                outputs = beam_search_first3(encoder_outputs, encoder_hidden, seq2context, attn_context2trg, BEAM_WIDTH = 8, BATCH_SIZE=BATCH_SIZE, max_len=3,EN=EN,context_size=context_size)
+                outputs = beam_search_first3(encoder_outputs, encoder_hidden, seq2context, attn_context2trg, BEAM_WIDTH = 1, BATCH_SIZE=BATCH_SIZE, max_len=trg.shape[1],EN=EN,context_size=context_size)
                 preds = torch.stack([i[:BATCH_SIZE,:] for i in outputs]).transpose(0,1).transpose(1,2)
-                l = criterion(preds, trg[:,1:4])
-                mask = trg[:,1:4]!=1
+                l = criterion(preds, trg[:,1:])
+                mask = trg[:,1:]!=1
                 loss += l[mask.squeeze()].sum()
             loss.backward()
             seq2context_optimizer.step()
@@ -499,3 +500,12 @@ def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq
                 print('Epoch: {}, Batch: {}, Loss: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE))
                 #print([EN.vocab.itos[i] for i in sentence])
                 #print([EN.vocab.itos[i] for i in trg[0,:]])
+                
+                
+                
+                
+def ints_to_sentences(list_of_phrases,EN):
+    sentences = []
+    for phrase in list_of_phrases:
+        sentences.append(" ".join(["|".join([EN.vocab.itos[w] for w in phrase])]))
+    return sentences
