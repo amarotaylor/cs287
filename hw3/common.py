@@ -149,7 +149,7 @@ def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_opt
             decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
             decoder_hidden = encoder_hidden
             sentence = []
-            for j in range(trg.shape[1] - 1):
+            for j in range(trg.shape[1] - 2):
                 word_input = trg[:,j]
                 decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
                 #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
@@ -184,7 +184,7 @@ def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,s
             loss = 0
             decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
             decoder_hidden = encoder_hidden
-            for j in range(trg.shape[1] - 1):
+            for j in range(trg.shape[1] - 2):
                 word_input = trg[:,j]
                 decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
                 #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
