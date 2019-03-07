@@ -132,7 +132,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
 
 criterion_train = nn.CrossEntropyLoss(reduction='sum')
 lsm2 = nn.LogSoftmax(dim=1)
-def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,BATCH_SIZE=32,context_size=500):
+def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,EN,BATCH_SIZE=32,context_size=500):
     seq2context.train()
     attn_context2trg.train()
     for ix,batch in enumerate(train_iter):
@@ -143,33 +143,30 @@ def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_opt
         
             seq2context_optimizer.zero_grad()
             attn_context2trg_optimizer.zero_grad()
-        
+            
             encoder_outputs, encoder_hidden = seq2context(src)
             loss = 0
+            word_input = torch.zeros(BATCH_SIZE, device='cuda') + EN.vocab.stoi['<s>']
             decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
             decoder_hidden = encoder_hidden
-            sentence = []
-            for j in range(trg.shape[1] - 2):
-                word_input = trg[:,j]
-                decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
+            for j in range(1,trg.shape[1]):
+                decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input.long(), decoder_context, decoder_hidden, encoder_outputs)
                 #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
-                l = criterion(decoder_output, trg[:,j+1])
-                mask = trg[:,j+1]>=2
+                l = criterion(decoder_output, trg[:,j])
+                mask = trg[:,j]>=2
                 loss += torch.sum(l[mask.squeeze()])
-                if np.mod(ix,100) == 0:
-                    sentence.extend([torch.argmax(decoder_output[0,:],dim=0)])
-                
+                word_input = trg[:,j]               
             loss.backward()
             seq2context_optimizer.step()
             attn_context2trg_optimizer.step()
         
-            if np.mod(ix,500) == 0:
+            if np.mod(ix,100) == 0:
                 print('Epoch: {}, Batch: {}, Loss: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE))
                 #print([EN.vocab.itos[i] for i in sentence])
                 #print([EN.vocab.itos[i] for i in trg[0,:]])
                 
                 
-def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,scheduler_s2c,BATCH_SIZE=32,context_size=500):
+def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,scheduler_s2c,BATCH_SIZE=32,context_size=500,EN=None):
     seq2context.eval()
     attn_context2trg.eval()
     total_loss = 0
@@ -184,16 +181,17 @@ def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,s
             loss = 0
             decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
             decoder_hidden = encoder_hidden
-            for j in range(trg.shape[1] - 2):
-                word_input = trg[:,j]
-                decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
+            word_input = torch.zeros(BATCH_SIZE, device='cuda') + EN.vocab.stoi['<s>']
+            for j in range(1,trg.shape[1]):
+                decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input.long(), decoder_context, decoder_hidden, encoder_outputs)
                 #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
-                loss = criterion(decoder_output, trg[:,j+1])
-                mask = trg[:,j+1]>=2
+                loss = criterion(decoder_output, trg[:,j])
+                word_input = trg[:,j]  
+                mask = trg[:,j]>=2
                 total_words += mask.sum()
                 track_loss = torch.sum(loss[mask.squeeze()])
                 total_loss += track_loss.detach()
-            
+                
     ppl = torch.exp(total_loss/total_words)
     scheduler_c2t.step(ppl)
     scheduler_s2c.step(ppl)
