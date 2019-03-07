@@ -6,6 +6,48 @@ from namedtensor import ntorch, NamedTensor
 from namedtensor.text import NamedField
 import numpy as np
 
+# set up
+lsm2 = nn.LogSoftmax(dim=1)
+lsm = torch.nn.LogSoftmax(dim=2)
+criterion = nn.CrossEntropyLoss(reduction='none')
+criterion_train = nn.CrossEntropyLoss(reduction='sum')
+
+def repackage_hidden(h):
+    return tuple(v.detach() for v in h)
+
+def reverse_sequence(src):
+    length = list(src.shape)[1]
+    idx = torch.linspace(length-1, 0, steps=length).long()
+    rev_src = src[:,idx]
+    return rev_src
+
+def load_model(model,state_dict_path):
+    state_dict = torch.load(state_dict_path)
+    model.load_state_dict(state_dict)
+
+def ints_to_sentences(list_of_phrases,EN):
+    sentences = []
+    for phrase in list_of_phrases:
+        sentences.append(" ".join(["|".join([EN.vocab.itos[w] for w in phrase])]))
+    return sentences
+
+def escape(l):
+    return l.replace("\"", "<quote>").replace(",", "<comma>")
+
+# numpy softmax
+def softmax(X, theta = 1.0, axis = None):
+    y = np.atleast_2d(X)
+    if axis is None:
+        axis = next(j[0] for j in enumerate(y.shape) if j[1] > 1)
+    y = y * float(theta)
+    y = y - np.expand_dims(np.max(y, axis = axis), axis)
+    y = np.exp(y)
+    ax_sum = np.expand_dims(np.sum(y, axis = axis), axis)
+    p = y / ax_sum
+    if len(X.shape) == 1: p = p.flatten()
+    return p   
+
+# encoder
 class SequenceModel(nn.Module):
     def __init__(self, src_vocab_size, context_size, num_layers=2, weight_init=0.08, dropout=0.4):
         super(SequenceModel, self).__init__()
@@ -23,10 +65,7 @@ class SequenceModel(nn.Module):
         context, hidden = self.lstm(embedded,h0)
         return context, hidden
     
-    
-    
-    
-# LSTM RNN
+# decoder
 class RNNet(torch.nn.Module):
 
     def __init__(self, input_size, hidden_size, num_layers, dropout=0.5, weight_tie=False, weight_init=0.05):
@@ -47,22 +86,7 @@ class RNNet(torch.nn.Module):
         y = self.lnr(x) # batch x seqlen x vocab
         return y, hidden    
     
-    
-
-def repackage_hidden(h):
-    return tuple(v.detach() for v in h)
-
-def reverse_sequence(src):
-    length = list(src.shape)[1]
-    idx = torch.linspace(length-1, 0, steps=length).long()
-    rev_src = src[:,idx]
-    return rev_src
-
-lsm = torch.nn.LogSoftmax(dim=2)
-criterion = nn.CrossEntropyLoss(reduction='none')
-
-
-
+# encoder-decoder, training loop
 def training_loop(e,train_iter,seq2context,context2trg,seq2context_optimizer,context2trg_optimizer,BATCH_SIZE):
     seq2context.train()
     context2trg.train()
@@ -92,7 +116,8 @@ def training_loop(e,train_iter,seq2context,context2trg,seq2context_optimizer,con
             var = torch.var(torch.argmax(lsm(output).cpu().detach(),2).float())
         if np.mod(ix,100) == 0:
             print('Epoch: {}, Batch: {}, Loss: {}, Variance: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE, var))
-            
+
+# encoder-decoder, validation loop
 def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2trg_sch,BATCH_SIZE):
     seq2context.eval()
     context2trg.eval()
@@ -106,7 +131,7 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
         src = reverse_sequence(src)
         trg = batch.trg.values.transpose(0,1)
         if src.shape[0]!=BATCH_SIZE:
-            x = 'blah'
+            x = 'reached end'
         else:
             # generate hidden state for decoder
             context, hidden_s2c = seq2context(src,h0)
@@ -128,11 +153,38 @@ def validation_loop(e,val_iter,seq2context,context2trg,seq2context_sch,context2t
     print('Epoch: {}, Validation loss: {}, Validation ppl: {}'.format(e, total_loss/(BATCH_SIZE*len(val_iter)), ppl))
     return ppl
 
+# encoder-decoder with attention
+class attn_RNNet_batched(torch.nn.Module):
 
+    def __init__(self, input_size, hidden_size, num_layers, dropout=0.5, weight_init=0.05,weight_tying=False,german_weights = None):
+        super(attn_RNNet_batched, self).__init__()
+        self.emb = torch.nn.Sequential(torch.nn.Embedding(input_size, hidden_size), torch.nn.Dropout(dropout))
+        self.rnn = torch.nn.LSTM(input_size=2*hidden_size, hidden_size=hidden_size, num_layers=num_layers, bias=True, batch_first=True, dropout=dropout)
+        self.lnr = torch.nn.Sequential(torch.nn.Dropout(dropout), torch.nn.Linear(2*hidden_size, input_size))
+    
+        for f in self.parameters():
+            torch.nn.init.uniform_(f, a=-weight_init, b=weight_init)
+        if weight_tying == True:
+            attn_context2trg.lnr[1].weight.data[:,:hidden_size] = self.emb[0].weight.data
+            
+    def attn_dot(self,rnn_output,encoder_outputs):
+        return F.softmax(torch.matmul(rnn_output.squeeze(0),encoder_outputs.transpose(0,1)).squeeze(),dim=0).unsqueeze(0).unsqueeze(0)
 
-criterion_train = nn.CrossEntropyLoss(reduction='sum')
-lsm2 = nn.LogSoftmax(dim=1)
-def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,EN,BATCH_SIZE=32,context_size=500):
+    def forward(self, word_input, last_context, last_hidden, encoder_outputs):
+        word_embedded = self.emb(word_input)
+        rnn_input = torch.cat([word_embedded, last_context], 1).unsqueeze(1) # batch x 1 x hiddenx2
+        rnn_output, hidden = self.rnn(rnn_input, last_hidden)
+        attn_weights = rnn_output.bmm(encoder_outputs.transpose(1,2))# batch x src_seqlen x 1
+        context = attn_weights.bmm(encoder_outputs)
+        rnn_output = rnn_output.squeeze(1)
+        context = context.squeeze(1)
+        output = self.lnr(torch.cat((rnn_output, context), 1))
+            
+        # prediction, last_context, last_hidden, weights for vis
+        return output, context, hidden, attn_weights 
+    
+# encoder-decoder with attention, training loop
+def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,BATCH_SIZE=32,context_size=500,EN=None):
     seq2context.train()
     attn_context2trg.train()
     for ix,batch in enumerate(train_iter):
@@ -164,9 +216,8 @@ def attn_training_loop(e,train_iter,seq2context,attn_context2trg,seq2context_opt
                 print('Epoch: {}, Batch: {}, Loss: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE))
                 #print([EN.vocab.itos[i] for i in sentence])
                 #print([EN.vocab.itos[i] for i in trg[0,:]])
-                
-                
 def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,scheduler_s2c,BATCH_SIZE=32,context_size=500,EN=None):
+# encoder-decoder with attention, validation loop                
     seq2context.eval()
     attn_context2trg.eval()
     total_loss = 0
@@ -198,63 +249,7 @@ def attn_validation_loop(e,val_iter,seq2context,attn_context2trg,scheduler_c2t,s
     print('Epoch: {}, Validation PPL: {}, Validation Loss: {}'.format(e,ppl,total_loss))
     return total_loss
         
-                
-class attn_RNNet_batched(torch.nn.Module):
-
-    def __init__(self, input_size, hidden_size, num_layers, dropout=0.5, weight_init=0.05,weight_tying=False,german_weights = None):
-        super(attn_RNNet_batched, self).__init__()
-        self.emb = torch.nn.Sequential(torch.nn.Embedding(input_size, hidden_size), torch.nn.Dropout(dropout))
-        self.rnn = torch.nn.LSTM(input_size=2*hidden_size, hidden_size=hidden_size, num_layers=num_layers, bias=True, batch_first=True, dropout=dropout)
-        self.lnr = torch.nn.Sequential(torch.nn.Dropout(dropout), torch.nn.Linear(2*hidden_size, input_size))
-    
-        for f in self.parameters():
-            torch.nn.init.uniform_(f, a=-weight_init, b=weight_init)
-        if weight_tying == True:
-            attn_context2trg.lnr[1].weight.data[:,:hidden_size] = self.emb[0].weight.data
-            
-    def attn_dot(self,rnn_output,encoder_outputs):
-        return F.softmax(torch.matmul(rnn_output.squeeze(0),encoder_outputs.transpose(0,1)).squeeze(),dim=0).unsqueeze(0).unsqueeze(0)
-
-    def forward(self, word_input, last_context, last_hidden, encoder_outputs):
-        word_embedded = self.emb(word_input)
-        rnn_input = torch.cat([word_embedded, last_context], 1).unsqueeze(1) # batch x 1 x hiddenx2
-        rnn_output, hidden = self.rnn(rnn_input, last_hidden)
-        attn_weights = rnn_output.bmm(encoder_outputs.transpose(1,2))# batch x src_seqlen x 1
-        context = attn_weights.bmm(encoder_outputs)
-        rnn_output = rnn_output.squeeze(1)
-        context = context.squeeze(1)
-        output = self.lnr(torch.cat((rnn_output, context), 1))
-            
-        # prediction, last_context, last_hidden, weights for vis
-        return output, context, hidden, attn_weights 
-    
-    
-def load_model(model,state_dict_path):
-    state_dict = torch.load(state_dict_path)
-    model.load_state_dict(state_dict)
-
-# numpy softmax
-def softmax(X, theta = 1.0, axis = None):
-
-    y = np.atleast_2d(X)
-
-    if axis is None:
-        axis = next(j[0] for j in enumerate(y.shape) if j[1] > 1)
-
-    y = y * float(theta)
-
-    y = y - np.expand_dims(np.max(y, axis = axis), axis)
-
-    y = np.exp(y)
-
-    ax_sum = np.expand_dims(np.sum(y, axis = axis), axis)
-
-    p = y / ax_sum
-
-    if len(X.shape) == 1: p = p.flatten()
-
-    return p    
-              
+# beam search implementation     
 def beam_search(src, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_SIZE=32, max_len=3,context_size=500,EN=None):
     top_p = {}
     top_s = {}
@@ -264,14 +259,13 @@ def beam_search(src, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_S
         top_s[i] = []
         items.append(i)
 
-
-
     encoder_outputs, encoder_hidden = attn_seq2context(src)
     decoder_context = torch.zeros(BATCH_SIZE, context_size, device='cuda') # 32 x 500
     decoder_hidden = encoder_hidden
     word_input = (torch.zeros(BATCH_SIZE, device='cuda') + EN.vocab.stoi['<s>']).long()
     decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
-    next_words = torch.argsort(lsm2(decoder_output),dim=1, descending=True)[:,0:BEAM_WIDTH].detach()
+    
+    next_words = torch.argsort(lsm2(decoder_output), dim=1, descending=True)[:,0:BEAM_WIDTH].detach()
     p_words_init = torch.stack([torch.index_select(decoder_output[i,:],-1,next_words[i,:]) for i in range(BATCH_SIZE)]).detach()
     p_words_running = torch.stack([p_words_init[:,b].repeat(1,BEAM_WIDTH) for b in range(BEAM_WIDTH)]).view(BEAM_WIDTH**2,BATCH_SIZE).transpose(0,1)
 
@@ -326,6 +320,7 @@ def beam_search(src, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_S
             next_words = torch.stack([torch.index_select(next_words[s,:],0,word_selector[s,:]) for s in range(BATCH_SIZE)]).transpose(0,1).flatten().long()
     return top_s
 
+# alternate beam search implementation
 def beam_search_first3(encoder_outputs, encoder_hidden, attn_seq2context, attn_context2trg, BEAM_WIDTH = 2, BATCH_SIZE=32, max_len=3,context_size=500,EN=None):
     top_p = {}
     top_s = {}
@@ -397,6 +392,8 @@ def beam_search_first3(encoder_outputs, encoder_hidden, attn_seq2context, attn_c
             next_words = torch.stack([torch.index_select(next_words[s,:],0,word_selector[s,:]) for s in range(BATCH_SIZE)]).transpose(0,1).flatten().long()
             
     return outputs
+
+# encoder-decoder with attention and split-train
 def attn_training_split_loop(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,BATCH_SIZE=32,context_size=500,EN=None):
     seq2context.train()
     attn_context2trg.train()
@@ -416,11 +413,7 @@ def attn_training_split_loop(e,train_iter,seq2context,attn_context2trg,seq2conte
             sentence = []
             p = np.random.rand()
             if p > 0.5:
-                
-            
                 for j in range(0,trg.shape[1]-2):
-                    
-                    
                     word_input = trg[:,j]
                     decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
                     #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
@@ -431,7 +424,6 @@ def attn_training_split_loop(e,train_iter,seq2context,attn_context2trg,seq2conte
                     if np.mod(ix,100) == 0:
                         sentence.extend([torch.argmax(decoder_output[0,:],dim=0)])
             else:
-                
                 top_s =  beam_search(src, seq2context, attn_context2trg, BEAM_WIDTH = 5, BATCH_SIZE=BATCH_SIZE, max_len=trg.shape[1],context_size=500,EN=EN)
                 predictions = torch.stack([top_s[i][0] for i in range(BATCH_SIZE)])
                 for j in range(predictions.shape[1] - 2):
@@ -450,6 +442,7 @@ def attn_training_split_loop(e,train_iter,seq2context,attn_context2trg,seq2conte
                 #print([EN.vocab.itos[i] for i in sentence])
                 #print([EN.vocab.itos[i] for i in trg[0,:]])
                 
+# encoder-decoder with attention and split-train, top 3
 def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq2context_optimizer,attn_context2trg_optimizer,BATCH_SIZE=32,context_size=500,EN=None):
     seq2context.train()
     attn_context2trg.train()
@@ -469,11 +462,7 @@ def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq
             sentence = []
             p = np.random.rand()
             if p > 1.0:
-                
-            
                 for j in range(0,trg.shape[1]-2):
-                    
-                    
                     word_input = trg[:,j]
                     decoder_output, decoder_context, decoder_hidden, decoder_attention = attn_context2trg(word_input, decoder_context, decoder_hidden, encoder_outputs)
                     #print(decoder_output.shape, trg[i,j+1].view(-1).shape)
@@ -484,7 +473,6 @@ def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq
                     if np.mod(ix,100) == 0:
                         sentence.extend([torch.argmax(decoder_output[0,:],dim=0)])
             else:
-                
                 outputs = beam_search_first3(encoder_outputs, encoder_hidden, seq2context, attn_context2trg, BEAM_WIDTH = 1, BATCH_SIZE=BATCH_SIZE, max_len=trg.shape[1],EN=EN,context_size=context_size)
                 preds = torch.stack([i[:BATCH_SIZE,:] for i in outputs]).transpose(0,1).transpose(1,2)
                 l = criterion(preds, trg[:,1:])
@@ -498,12 +486,3 @@ def attn_training_split_loop_top_3(e,train_iter,seq2context,attn_context2trg,seq
                 print('Epoch: {}, Batch: {}, Loss: {}'.format(e, ix, loss.cpu().detach()/BATCH_SIZE))
                 #print([EN.vocab.itos[i] for i in sentence])
                 #print([EN.vocab.itos[i] for i in trg[0,:]])
-                
-                
-                
-                
-def ints_to_sentences(list_of_phrases,EN):
-    sentences = []
-    for phrase in list_of_phrases:
-        sentences.append(" ".join(["|".join([EN.vocab.itos[w] for w in phrase])]))
-    return sentences
