@@ -42,10 +42,12 @@ class Decomposable_Attn_Network(torch.nn.Module):
         self.hidden_size = hidden_size
         self.embed_size = embed_size
         self.output_size = output_size
-        self.Embedding_layer = EmbedProject(weights,self.embed_size,project_size=self.hidden_size)
+        self.Embedding_layer = EmbedProject(weights,self.embed_size,self.hidden_size)
         self.F = FeedForward_layer(self.hidden_size,self.hidden_size,self.hidden_size)
         self.G = FeedForward_layer(self.hidden_size*2,self.hidden_size,self.hidden_size)
-        self.H = FeedForward_layer(self.hidden_size*2,self.hidden_size,self.output_size)
+        self.H = FeedForward_layer(self.hidden_size*2,self.hidden_size,self.hidden_size)
+        self.linear = nn.Linear(hidden_size, output_size)
+        torch.nn.init.normal_(self.linear.weight, mean=0, std=0.01)
         
     def attention_and_mask(self,hook1,hook2,sent1,sent2,pad_tkn = 1):
         score1 = torch.bmm(hook1,hook2.transpose(1,2))
@@ -85,9 +87,9 @@ class Decomposable_Attn_Network(torch.nn.Module):
         # sum pool
         g1_sum = g1.sum(dim=1)
         g2_sum = g2.sum(dim=1)
-        
         # concatenate and final feed forward
         g_all = torch.cat((g1_sum, g2_sum), dim=1)
         h_all = self.H(g_all)
-        return h_all
+        output = self.linear(h_all)
+        return output
         
